@@ -9,6 +9,7 @@ class SimplybookAPI {
     // Using the token directly since it's already authenticated
     private $token = '3ce5e34c1a42959c9c61f4ffb2f3e4a7f473b717e41cfe10c31702f24ecd0242';
     private $api_url = 'https://user-api.simplybook.me/';
+    private $public_api_base = 'https://mdgnotaryca.simplybook.me/v2';
     private $unit_id = 2; // Giuliano Helguero
     
     public function __construct() {
@@ -55,6 +56,53 @@ class SimplybookAPI {
         
         return $result;
     }
+
+    private function makePublicGet($path, array $params = []) {
+        $base = rtrim($this->public_api_base, '/');
+        $url = $base . '/' . ltrim($path, '/');
+
+        if (!empty($params)) {
+            $query_string = http_build_query($params);
+            $url .= '?' . $query_string;
+        }
+
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Accept: application/json'
+        ]);
+
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+        if (curl_errno($ch)) {
+            error_log('CURL Public API Error: ' . curl_error($ch));
+            curl_close($ch);
+            return false;
+        }
+
+        curl_close($ch);
+
+        $decoded = json_decode($response, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            error_log('Public API JSON decode error: ' . json_last_error_msg());
+            error_log('Response body: ' . substr($response, 0, 500));
+            return false;
+        }
+
+        if ($http_code !== 200) {
+            error_log('Public API Request failed. URL: ' . $url . ' HTTP Code: ' . $http_code);
+            error_log('Response body: ' . substr($response, 0, 500));
+            return false;
+        }
+
+        error_log('Public API Request to: ' . $url);
+        error_log('Public API Response Code: ' . $http_code);
+
+        return $decoded;
+    }
     
     public function getAvailableDates($event_id, $date_from = null, $date_to = null) {
         if (!$date_from) {
@@ -64,40 +112,75 @@ class SimplybookAPI {
             $date_to = date('Y-m-d', strtotime('+30 days'));
         }
         
-        $request = [
-            'jsonrpc' => '2.0',
-            'method' => 'getWorkDaysInfo',
-            'params' => [
-                $date_from,     // from date
-                $date_to,       // to date
-                intval($this->unit_id),  // unit_id as integer
-                intval($event_id),       // event_id as integer
-                1               // count
-            ],
-            'id' => 1
+        $params = [
+            'service' => intval($event_id),
+            'unit' => intval($this->unit_id),
+            'from' => $date_from,
+            'to' => $date_to,
+            'count' => 1
         ];
-        
-        $result = $this->makeRequest(null, $request, true);
-        
-        // Return the result array directly
-        return $result;
+
+        $days = $this->makePublicGet('/booking/working-days/', $params);
+        if ($days === false || !is_array($days)) {
+            return false;
+        }
+
+        $availability = [];
+        foreach ($days as $day) {
+            if (!isset($day['id'])) {
+                continue;
+            }
+
+            $has_time = !empty($day['time']) && is_array($day['time']);
+            $is_day_off = !empty($day['is_day_off']);
+
+            $availability[$day['id']] = $has_time && !$is_day_off;
+        }
+
+        return [
+            'result' => $availability
+        ];
     }
     
     public function getAvailableTimeSlots($event_id, $date) {
-        $request = [
-            'jsonrpc' => '2.0',
-            'method' => 'getStartTimeMatrix',
-            'params' => [
-                $date,
-                $date,
-                $event_id,
-                $this->unit_id,
-                1
-            ],
-            'id' => 1
+        $params = [
+            'from' => $date,
+            'to' => $date,
+            'provider' => intval($this->unit_id),
+            'service' => intval($event_id),
+            'count' => 1
         ];
-        
-        return $this->makeRequest(null, $request);
+
+        $slots = $this->makePublicGet('/booking/time-slots/', $params);
+        if ($slots === false || !is_array($slots)) {
+            return false;
+        }
+
+        $available_times = [];
+        foreach ($slots as $slot) {
+            if (!is_array($slot)) {
+                continue;
+            }
+
+            $type = isset($slot['type']) ? $slot['type'] : '';
+            if ($type !== 'free') {
+                continue;
+            }
+
+            if (!empty($slot['time'])) {
+                $time_value = substr($slot['time'], 0, 5);
+                $available_times[] = $time_value;
+            } elseif (!empty($slot['client_time'])) {
+                $time_value = substr($slot['client_time'], 0, 5);
+                $available_times[] = $time_value;
+            }
+        }
+
+        return [
+            'result' => [
+                $date => array_values(array_unique($available_times))
+            ]
+        ];
     }
     
     public function createBooking($event_id, $date, $time, $client_data, $additional = []) {
