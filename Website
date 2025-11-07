@@ -18,16 +18,21 @@ class SimplybookAPI {
     private function makeRequest($url, $data, $use_token = true) {
         $ch = curl_init();
         
-        // Correct endpoint URL
-        if ($use_token && $this->token) {
-            $url = 'https://user-api-v2.simplybook.me/admin/';
+        // Resolve endpoint URL, defaulting to base API URL
+        if (!$url) {
+            $url = rtrim($this->api_url, '/') . '/';
+        } elseif (strpos($url, 'http') !== 0) {
+            $url = rtrim($this->api_url, '/') . '/' . ltrim($url, '/');
         }
         
         $headers = [
             'Content-Type: application/json',
-            'X-Company-Login: ' . $this->company_login,
-            'X-Token: ' . $this->token
         ];
+        
+        if ($use_token && $this->token) {
+            $headers[] = 'X-Company-Login: ' . $this->company_login;
+            $headers[] = 'X-Token: ' . $this->token;
+        }
         
         curl_setopt($ch, CURLOPT_URL, $url);
         curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
@@ -68,11 +73,11 @@ class SimplybookAPI {
             'jsonrpc' => '2.0',
             'method' => 'getWorkDaysInfo',
             'params' => [
-                $date_from,     // from date
-                $date_to,       // to date
-                intval($this->unit_id),  // unit_id as integer
-                intval($event_id),       // event_id as integer
-                1               // count
+                'from' => $date_from,
+                'to' => $date_to,
+                'unitId' => (int) $this->unit_id,
+                'eventId' => (int) $event_id,
+                'count' => 1
             ],
             'id' => 1
         ];
