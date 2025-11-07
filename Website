@@ -1,0 +1,2266 @@
+<?php
+/*
+Template Name: MDG Notary Page with Booking System
+*/
+
+// SimplyBook.me API Integration Class
+class SimplybookAPI {
+    private $company_login = 'mdgnotaryca';
+    // Using the token directly since it's already authenticated
+    private $token = '3ce5e34c1a42959c9c61f4ffb2f3e4a7f473b717e41cfe10c31702f24ecd0242';
+    private $api_url = 'https://user-api.simplybook.me/';
+    private $unit_id = 2; // Giuliano Helguero
+    
+    public function __construct() {
+        // Token is already set, no need to authenticate
+    }
+    
+    private function makeRequest($url, $data, $use_token = true) {
+        $ch = curl_init();
+        
+        // Correct endpoint URL
+        if ($use_token && $this->token) {
+            $url = 'https://user-api-v2.simplybook.me/admin/';
+        }
+        
+        $headers = [
+            'Content-Type: application/json',
+            'X-Company-Login: ' . $this->company_login,
+            'X-Token: ' . $this->token
+        ];
+        
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        
+        if (curl_errno($ch)) {
+            error_log('CURL Error: ' . curl_error($ch));
+            return false;
+        }
+        
+        curl_close($ch);
+        
+        $result = json_decode($response, true);
+        
+        // Debug logging
+        error_log('API Request to: ' . $url);
+        error_log('API Response Code: ' . $http_code);
+        error_log('API Response: ' . substr($response, 0, 500));
+        
+        return $result;
+    }
+    
+    public function getAvailableDates($event_id, $date_from = null, $date_to = null) {
+        if (!$date_from) {
+            $date_from = date('Y-m-d');
+        }
+        if (!$date_to) {
+            $date_to = date('Y-m-d', strtotime('+30 days'));
+        }
+        
+        $request = [
+            'jsonrpc' => '2.0',
+            'method' => 'getWorkDaysInfo',
+            'params' => [
+                $date_from,     // from date
+                $date_to,       // to date
+                intval($this->unit_id),  // unit_id as integer
+                intval($event_id),       // event_id as integer
+                1               // count
+            ],
+            'id' => 1
+        ];
+        
+        $result = $this->makeRequest(null, $request, true);
+        
+        // Return the result array directly
+        return $result;
+    }
+    
+    public function getAvailableTimeSlots($event_id, $date) {
+        $request = [
+            'jsonrpc' => '2.0',
+            'method' => 'getStartTimeMatrix',
+            'params' => [
+                $date,
+                $date,
+                $event_id,
+                $this->unit_id,
+                1
+            ],
+            'id' => 1
+        ];
+        
+        return $this->makeRequest(null, $request);
+    }
+    
+    public function createBooking($event_id, $date, $time, $client_data, $additional = []) {
+        $client = $this->addClient($client_data);
+        
+        if (!$client) {
+            return false;
+        }
+        
+        $request = [
+            'jsonrpc' => '2.0',
+            'method' => 'book',
+            'params' => [
+                $event_id,
+                $this->unit_id,
+                $date,
+                $time,
+                [
+                    'id' => $client['id'],
+                    'name' => $client_data['name'],
+                    'email' => $client_data['email'],
+                    'phone' => $client_data['phone']
+                ],
+                $additional,
+                1
+            ],
+            'id' => 1
+        ];
+        
+        return $this->makeRequest(null, $request);
+    }
+    
+    public function addClient($client_data) {
+        $request = [
+            'jsonrpc' => '2.0',
+            'method' => 'addClient',
+            'params' => [
+                [
+                    'name' => $client_data['name'],
+                    'email' => $client_data['email'],
+                    'phone' => $client_data['phone']
+                ]
+            ],
+            'id' => 1
+        ];
+        
+        $response = $this->makeRequest(null, $request);
+        return isset($response['result']) ? $response['result'] : false;
+    }
+    
+    public function getPaymentInfo($booking_id) {
+        $request = [
+            'jsonrpc' => '2.0',
+            'method' => 'getBookingCartPaymentPageUrl',
+            'params' => [
+                $booking_id
+            ],
+            'id' => 1
+        ];
+        
+        return $this->makeRequest(null, $request);
+    }
+}
+
+// Handle AJAX requests
+if (isset($_GET['action']) && $_GET['action'] === 'mdg_ajax') {
+    header('Content-Type: application/json');
+    
+    $api = new SimplybookAPI();
+    $response = ['success' => false, 'message' => ''];
+    
+    try {
+        if ($_POST['request_type'] === 'get_dates') {
+            $service_id = intval($_POST['service_id']);
+            
+            // Test API connection first
+            $test_request = [
+                'jsonrpc' => '2.0',
+                'method' => 'getCompanyInfo',
+                'params' => [],
+                'id' => 1
+            ];
+            
+            // Try to get company info to test connection
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, 'https://user-api-v2.simplybook.me/admin/');
+            curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                'Content-Type: application/json',
+                'X-Company-Login: mdgnotaryca',
+                'X-Token: 3ce5e34c1a42959c9c61f4ffb2f3e4a7f473b717e41cfe10c31702f24ecd0242'
+            ]);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($test_request));
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+            
+            $test_response = curl_exec($ch);
+            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            
+            if ($http_code !== 200) {
+                $response['message'] = 'API Connection failed. HTTP Code: ' . $http_code;
+                $response['debug'] = $test_response;
+            } else {
+                // Now get the actual dates
+                $result = $api->getAvailableDates($service_id);
+                
+                if ($result && isset($result['result'])) {
+                    $response = [
+                        'success' => true, 
+                        'dates' => $result['result'],
+                        'message' => 'Dates loaded successfully'
+                    ];
+                } else {
+                    $response['message'] = 'No dates available for this service';
+                    $response['debug'] = json_encode($result);
+                }
+            }
+        }
+        
+        if ($_POST['request_type'] === 'get_times') {
+            $service_id = intval($_POST['service_id']);
+            $date = $_POST['date'];
+            
+            $result = $api->getAvailableTimeSlots($service_id, $date);
+            if ($result && isset($result['result'])) {
+                $response = [
+                    'success' => true, 
+                    'times' => $result['result'][$date] ?? [],
+                    'message' => 'Times loaded successfully'
+                ];
+            } else {
+                $response['message'] = 'No times available for this date';
+            }
+        }
+        
+        if ($_POST['request_type'] === 'create_booking') {
+            $client_data = [
+                'name' => sanitize_text_field($_POST['name']),
+                'email' => sanitize_email($_POST['email']),
+                'phone' => sanitize_text_field($_POST['phone'])
+            ];
+            
+            $additional = [];
+            if (!empty($_POST['company'])) {
+                $additional[] = ['id' => 1, 'value' => sanitize_text_field($_POST['company'])];
+            }
+            if (!empty($_POST['notes'])) {
+                $additional[] = ['id' => 2, 'value' => sanitize_text_field($_POST['notes'])];
+            }
+            if (!empty($_POST['urgency'])) {
+                $additional[] = ['id' => 3, 'value' => sanitize_text_field($_POST['urgency'])];
+            }
+            
+            $result = $api->createBooking(
+                intval($_POST['service_id']),
+                $_POST['date'],
+                $_POST['time'],
+                $client_data,
+                $additional
+            );
+            
+            if ($result && isset($result['result'])) {
+                $booking_data = $result['result'];
+                $payment_url = '';
+                
+                if ($booking_data['require_payment']) {
+                    $payment_info = $api->getPaymentInfo($booking_data['bookings'][0]);
+                    if ($payment_info && isset($payment_info['result'])) {
+                        $payment_url = $payment_info['result'];
+                    }
+                }
+                
+                $response = [
+                    'success' => true,
+                    'booking_id' => $booking_data['bookings'][0],
+                    'payment_required' => $booking_data['require_payment'],
+                    'payment_url' => $payment_url,
+                    'message' => 'Booking created successfully'
+                ];
+            } else {
+                $response['message'] = 'Failed to create booking';
+            }
+        }
+        
+    } catch (Exception $e) {
+        $response['message'] = 'Error: ' . $e->getMessage();
+    }
+    
+    echo json_encode($response);
+    exit;
+}
+
+// Service mapping with IDs from SimplyBook.me
+$services = [
+    'corporate' => [
+        2 => ['name' => 'M&A Transactions', 'priority' => 1],
+        17 => ['name' => 'Board Resolutions', 'priority' => 2],
+        12 => ['name' => 'Corporate Power of Attorney', 'priority' => 3],
+        19 => ['name' => 'International Trade', 'priority' => 4],
+        18 => ['name' => 'Other Corporate', 'priority' => 5],
+        8 => ['name' => 'Apostille Services', 'priority' => 6],
+        13 => ['name' => 'Real Estate (Closing)', 'priority' => 7],
+        15 => ['name' => 'Commercial Real Estate', 'priority' => 8]
+    ],
+    'private' => [
+        21 => ['name' => 'Jail/Prison Services', 'priority' => 1],
+        20 => ['name' => 'Hospital Bedside', 'priority' => 2],
+        3 => ['name' => 'General Notarization', 'priority' => 3],
+        10 => ['name' => 'Wills & Trusts', 'priority' => 4],
+        11 => ['name' => 'Healthcare Directives', 'priority' => 5],
+        14 => ['name' => 'Loan Documents', 'priority' => 6],
+        4 => ['name' => 'Vehicle Title Transfer', 'priority' => 7],
+        7 => ['name' => 'Divorce Documents', 'priority' => 8],
+        5 => ['name' => 'Apostille Services', 'priority' => 9]
+    ]
+];
+?>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MDG Executive Notary & Apostille Services | Mobile Notary | Confidential. Immediate. Impeccable.</title>
+    
+    <!-- Premium Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    
+    <!-- jQuery for AJAX -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        :root {
+            --navy: #0a1628;
+            --charcoal: #1e2936;
+            --gold: #d4af37;
+            --platinum: #e5e4e2;
+            --white: #ffffff;
+            --text-light: #8a919e;
+        }
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            font-weight: 300;
+            color: var(--platinum);
+            background-color: var(--navy);
+            overflow-x: hidden;
+        }
+        
+        /* Hero Section */
+        .hero {
+            min-height: 100vh;
+            background: linear-gradient(135deg, rgba(10, 22, 40, 0.95), rgba(30, 41, 54, 0.9)), 
+                        url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080"><rect fill="%230a1628" width="1920" height="1080"/><polygon fill="%23d4af37" opacity="0.03" points="0,0 960,540 0,1080"/></svg>');
+            background-size: cover;
+            background-position: center;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 40px 0;
+        }
+        
+        /* Navigation */
+        nav {
+            padding: 0 5%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            animation: fadeInDown 0.8s ease;
+        }
+        
+        .logo {
+            font-family: 'Playfair Display', serif;
+            font-size: 28px;
+            font-weight: 700;
+            color: var(--gold);
+            letter-spacing: -0.5px;
+        }
+        
+        .nav-contact {
+            display: flex;
+            align-items: center;
+            gap: 30px;
+        }
+        
+        .trust-indicators {
+            display: flex;
+            gap: 20px;
+            color: var(--text-light);
+            font-size: 12px;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+        
+        .trust-indicators span {
+            padding: 0 15px;
+            border-left: 1px solid var(--gold);
+            opacity: 0.8;
+        }
+        
+        .trust-indicators span:first-child {
+            border-left: none;
+        }
+        
+        .priority-line {
+            background: var(--gold);
+            color: var(--navy);
+            padding: 12px 28px;
+            border-radius: 30px;
+            text-decoration: none;
+            font-weight: 500;
+            transition: all 0.3s ease;
+            font-size: 14px;
+            letter-spacing: 0.5px;
+        }
+        
+        .priority-line:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(212, 175, 55, 0.3);
+        }
+        
+        /* Hero Content */
+        .hero-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 60px 5%;
+            text-align: center;
+        }
+        
+        .tagline {
+            color: var(--gold);
+            font-size: 16px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-bottom: 30px;
+            animation: fadeIn 1s ease 0.3s both;
+        }
+        
+        h1 {
+            font-family: 'Playfair Display', serif;
+            font-size: clamp(48px, 6vw, 82px);
+            font-weight: 400;
+            line-height: 1.1;
+            color: var(--white);
+            margin-bottom: 20px;
+            animation: fadeInUp 1s ease 0.5s both;
+        }
+        
+        .subtitle {
+            font-size: 22px;
+            color: var(--platinum);
+            font-weight: 300;
+            margin-bottom: 50px;
+            opacity: 0.9;
+            animation: fadeInUp 1s ease 0.7s both;
+        }
+        
+        /* Client Segmentation */
+        .client-paths {
+            display: flex;
+            gap: 40px;
+            margin-top: 20px;
+            animation: fadeInUp 1s ease 0.9s both;
+        }
+        
+        .path-card {
+            background: rgba(30, 41, 54, 0.6);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(212, 175, 55, 0.2);
+            padding: 40px 50px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.4s ease;
+            min-width: 320px;
+        }
+        
+        .path-card:hover {
+            background: rgba(30, 41, 54, 0.9);
+            border-color: var(--gold);
+            transform: translateY(-5px);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+        }
+        
+        .path-title {
+            font-family: 'Playfair Display', serif;
+            font-size: 28px;
+            color: var(--gold);
+            margin-bottom: 20px;
+        }
+        
+        .path-services {
+            list-style: none;
+            color: var(--platinum);
+            line-height: 1.8;
+            margin-bottom: 30px;
+        }
+        
+        .path-services li {
+            padding-left: 20px;
+            position: relative;
+            opacity: 0.9;
+            padding-top: 8px;
+            padding-bottom: 8px;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+        
+        .path-services li:hover {
+            color: var(--gold);
+            padding-left: 30px;
+            opacity: 1;
+        }
+        
+        .path-services li:before {
+            content: "›";
+            position: absolute;
+            left: 0;
+            color: var(--gold);
+            font-size: 20px;
+            transition: transform 0.3s ease;
+        }
+        
+        .path-services li:hover:before {
+            transform: translateX(5px);
+        }
+        
+        .path-cta {
+            background: transparent;
+            color: var(--gold);
+            border: 1px solid var(--gold);
+            padding: 12px 30px;
+            border-radius: 30px;
+            font-size: 14px;
+            font-weight: 500;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            width: 100%;
+        }
+        
+        .path-cta:hover {
+            background: var(--gold);
+            color: var(--navy);
+        }
+        
+        /* Modal Styles */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(10, 22, 40, 0.95);
+            z-index: 9999;
+            overflow-y: auto;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        
+        .modal.active {
+            display: block;
+            opacity: 1;
+        }
+        
+        .modal-content {
+            position: relative;
+            background: linear-gradient(135deg, var(--charcoal), var(--navy));
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 60px;
+            border-radius: 12px;
+            border: 1px solid rgba(212, 175, 55, 0.2);
+            box-shadow: 0 30px 60px rgba(0, 0, 0, 0.5);
+            animation: slideInUp 0.4s ease;
+        }
+        
+        .close {
+            position: absolute;
+            top: 20px;
+            right: 30px;
+            font-size: 32px;
+            color: var(--text-light);
+            cursor: pointer;
+            transition: color 0.3s ease;
+        }
+        
+        .close:hover {
+            color: var(--gold);
+        }
+        
+        /* Booking Form Styles */
+        .booking-header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        
+        .booking-title {
+            font-family: 'Playfair Display', serif;
+            font-size: 36px;
+            color: var(--gold);
+            margin-bottom: 10px;
+        }
+        
+        .booking-subtitle {
+            color: var(--text-light);
+            font-size: 16px;
+        }
+        
+        /* Progress Indicator */
+        .booking-progress {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 40px;
+            position: relative;
+        }
+        
+        .booking-progress::before {
+            content: '';
+            position: absolute;
+            top: 20px;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: rgba(212, 175, 55, 0.2);
+            z-index: 0;
+        }
+        
+        .progress-step {
+            position: relative;
+            z-index: 1;
+            text-align: center;
+            flex: 1;
+        }
+        
+        .step-circle {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: var(--charcoal);
+            border: 2px solid rgba(212, 175, 55, 0.3);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 10px;
+            color: var(--text-light);
+            font-size: 14px;
+            transition: all 0.3s ease;
+        }
+        
+        .progress-step.active .step-circle {
+            background: var(--gold);
+            color: var(--navy);
+            border-color: var(--gold);
+        }
+        
+        .progress-step.completed .step-circle {
+            background: transparent;
+            border-color: var(--gold);
+            color: var(--gold);
+        }
+        
+        .step-label {
+            font-size: 12px;
+            color: var(--text-light);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        /* Booking Steps */
+        .booking-step {
+            display: none;
+        }
+        
+        .booking-step.active {
+            display: block;
+            animation: fadeIn 0.4s ease;
+        }
+        
+        /* Service Selection */
+        .service-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+        
+        .service-option {
+            background: rgba(30, 41, 54, 0.5);
+            border: 1px solid rgba(212, 175, 55, 0.2);
+            padding: 15px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-align: center;
+        }
+        
+        .service-option:hover {
+            border-color: rgba(212, 175, 55, 0.5);
+            background: rgba(30, 41, 54, 0.8);
+        }
+        
+        .service-option.selected {
+            border-color: var(--gold);
+            background: rgba(212, 175, 55, 0.1);
+        }
+        
+        .service-option input[type="radio"] {
+            display: none;
+        }
+        
+        .service-name {
+            color: var(--platinum);
+            font-size: 14px;
+        }
+        
+        /* Calendar Styles */
+        .calendar-container {
+            margin-bottom: 30px;
+        }
+        
+        .calendar-month {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 10px;
+            margin-top: 20px;
+        }
+        
+        .calendar-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .month-year {
+            font-family: 'Playfair Display', serif;
+            font-size: 24px;
+            color: var(--gold);
+        }
+        
+        .calendar-nav {
+            display: flex;
+            gap: 10px;
+        }
+        
+        .calendar-nav button {
+            background: transparent;
+            border: 1px solid var(--gold);
+            color: var(--gold);
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .calendar-nav button:hover {
+            background: var(--gold);
+            color: var(--navy);
+        }
+        
+        .day-label {
+            text-align: center;
+            font-size: 12px;
+            color: var(--text-light);
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        
+        .calendar-day {
+            aspect-ratio: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(30, 41, 54, 0.3);
+            border: 1px solid transparent;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            color: var(--platinum);
+        }
+        
+        .calendar-day.available {
+            background: rgba(30, 41, 54, 0.5);
+            border-color: rgba(212, 175, 55, 0.2);
+        }
+        
+        .calendar-day.available:hover {
+            border-color: var(--gold);
+            background: rgba(212, 175, 55, 0.1);
+        }
+        
+        .calendar-day.selected {
+            background: var(--gold);
+            color: var(--navy);
+            border-color: var(--gold);
+        }
+        
+        .calendar-day.unavailable {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+        
+        /* Time Slots */
+        .time-slots-container {
+            margin-bottom: 30px;
+        }
+        
+        .time-slots-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            margin-top: 20px;
+        }
+        
+        .time-slot {
+            background: rgba(30, 41, 54, 0.5);
+            border: 1px solid rgba(212, 175, 55, 0.2);
+            padding: 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-align: center;
+            color: var(--platinum);
+            font-size: 14px;
+        }
+        
+        .time-slot:hover {
+            border-color: var(--gold);
+            background: rgba(212, 175, 55, 0.1);
+        }
+        
+        .time-slot.selected {
+            background: var(--gold);
+            color: var(--navy);
+            border-color: var(--gold);
+        }
+        
+        .time-slot input[type="radio"] {
+            display: none;
+        }
+        
+        /* Form Fields */
+        .form-section {
+            margin-bottom: 30px;
+        }
+        
+        .section-title {
+            font-size: 18px;
+            color: var(--gold);
+            margin-bottom: 20px;
+            font-weight: 400;
+        }
+        
+        .form-row {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .form-group.full-width {
+            grid-column: 1 / -1;
+        }
+        
+        label {
+            color: var(--text-light);
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+        
+        input[type="text"],
+        input[type="email"],
+        input[type="tel"],
+        textarea,
+        select {
+            background: rgba(30, 41, 54, 0.5);
+            border: 1px solid rgba(212, 175, 55, 0.2);
+            color: var(--platinum);
+            padding: 12px 15px;
+            border-radius: 8px;
+            font-size: 15px;
+            transition: all 0.3s ease;
+        }
+        
+        input[type="text"]:focus,
+        input[type="email"]:focus,
+        input[type="tel"]:focus,
+        textarea:focus,
+        select:focus {
+            outline: none;
+            border-color: var(--gold);
+            background: rgba(30, 41, 54, 0.8);
+        }
+        
+        textarea {
+            resize: vertical;
+            min-height: 100px;
+        }
+        
+        /* Urgency Options */
+        .urgency-options {
+            display: flex;
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .urgency-option {
+            flex: 1;
+            background: rgba(30, 41, 54, 0.5);
+            border: 1px solid rgba(212, 175, 55, 0.2);
+            padding: 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-align: center;
+        }
+        
+        .urgency-option:hover {
+            border-color: rgba(212, 175, 55, 0.5);
+        }
+        
+        .urgency-option.selected {
+            border-color: var(--gold);
+            background: rgba(212, 175, 55, 0.1);
+        }
+        
+        .urgency-option input[type="radio"] {
+            display: none;
+        }
+        
+        .urgency-label {
+            color: var(--gold);
+            font-size: 16px;
+            font-weight: 500;
+            margin-bottom: 5px;
+            display: block;
+        }
+        
+        .urgency-time {
+            color: var(--text-light);
+            font-size: 12px;
+        }
+        
+        /* Booking Actions */
+        .booking-actions {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 40px;
+            padding-top: 30px;
+            border-top: 1px solid rgba(212, 175, 55, 0.2);
+        }
+        
+        .btn {
+            padding: 12px 30px;
+            border-radius: 30px;
+            font-size: 14px;
+            font-weight: 500;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            border: none;
+            outline: none;
+        }
+        
+        .btn-secondary {
+            background: transparent;
+            color: var(--text-light);
+            border: 1px solid var(--text-light);
+        }
+        
+        .btn-secondary:hover {
+            border-color: var(--gold);
+            color: var(--gold);
+        }
+        
+        .btn-primary {
+            background: var(--gold);
+            color: var(--navy);
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(212, 175, 55, 0.3);
+        }
+        
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        /* Loading State */
+        .loading-spinner {
+            display: none;
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(212, 175, 55, 0.2);
+            border-top-color: var(--gold);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        
+        .loading-spinner.active {
+            display: block;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Success Message */
+        .success-message {
+            text-align: center;
+            padding: 60px;
+        }
+        
+        .success-icon {
+            width: 80px;
+            height: 80px;
+            background: var(--gold);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 30px;
+            font-size: 40px;
+            color: var(--navy);
+        }
+        
+        .success-title {
+            font-family: 'Playfair Display', serif;
+            font-size: 32px;
+            color: var(--gold);
+            margin-bottom: 15px;
+        }
+        
+        .success-text {
+            color: var(--platinum);
+            font-size: 16px;
+            line-height: 1.6;
+            margin-bottom: 30px;
+        }
+        
+        /* Pain Points Section */
+        .pain-points {
+            padding: 100px 5%;
+            background: linear-gradient(180deg, var(--navy), var(--charcoal));
+        }
+        
+        .section-header {
+            text-align: center;
+            margin-bottom: 60px;
+        }
+        
+        .section-title {
+            font-family: 'Playfair Display', serif;
+            font-size: 48px;
+            color: var(--white);
+            margin-bottom: 20px;
+        }
+        
+        .section-subtitle {
+            font-size: 18px;
+            color: var(--text-light);
+            font-weight: 300;
+        }
+        
+        .pain-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 30px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        .pain-card {
+            background: rgba(30, 41, 54, 0.5);
+            border-left: 3px solid var(--gold);
+            padding: 30px;
+            transition: all 0.3s ease;
+        }
+        
+        .pain-card:hover {
+            background: rgba(30, 41, 54, 0.8);
+            transform: translateX(10px);
+        }
+        
+        .pain-title {
+            font-size: 20px;
+            color: var(--gold);
+            margin-bottom: 15px;
+            font-weight: 500;
+        }
+        
+        .pain-description {
+            color: var(--platinum);
+            line-height: 1.6;
+            opacity: 0.9;
+        }
+        
+        /* Value Proposition Section */
+        .value-prop {
+            padding: 100px 5%;
+            background: var(--charcoal);
+        }
+        
+        .value-content {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        .value-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 60px;
+            margin-top: 50px;
+        }
+        
+        .value-category-title {
+            font-family: 'Playfair Display', serif;
+            font-size: 28px;
+            color: var(--gold);
+            margin-bottom: 30px;
+        }
+        
+        .value-list {
+            list-style: none;
+        }
+        
+        .value-list li {
+            color: var(--platinum);
+            padding: 15px 0;
+            padding-left: 30px;
+            position: relative;
+            border-bottom: 1px solid rgba(212, 175, 55, 0.1);
+            transition: all 0.3s ease;
+        }
+        
+        .value-list li:before {
+            content: "✓";
+            position: absolute;
+            left: 0;
+            color: var(--gold);
+            font-weight: bold;
+        }
+        
+        .value-list li:hover {
+            padding-left: 40px;
+            color: var(--white);
+        }
+        
+        /* Social Proof Section */
+        .social-proof {
+            padding: 100px 5%;
+            background: linear-gradient(180deg, var(--charcoal), var(--navy));
+        }
+        
+        .testimonials {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 30px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        .testimonial {
+            background: rgba(30, 41, 54, 0.5);
+            padding: 30px;
+            border-radius: 8px;
+            border: 1px solid rgba(212, 175, 55, 0.1);
+            transition: all 0.3s ease;
+        }
+        
+        .testimonial:hover {
+            transform: translateY(-5px);
+            border-color: var(--gold);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+        }
+        
+        .testimonial-text {
+            color: var(--platinum);
+            font-size: 15px;
+            line-height: 1.7;
+            margin-bottom: 25px;
+            font-style: italic;
+        }
+        
+        .testimonial-author {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .author-avatar {
+            width: 50px;
+            height: 50px;
+            background: var(--gold);
+            color: var(--navy);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 18px;
+        }
+        
+        .author-name {
+            color: var(--gold);
+            font-weight: 500;
+            margin-bottom: 5px;
+        }
+        
+        .author-title {
+            color: var(--text-light);
+            font-size: 13px;
+        }
+        
+        /* CTA Section */
+        .cta-section {
+            padding: 120px 5%;
+            background: linear-gradient(135deg, var(--gold), #b8941f);
+            text-align: center;
+        }
+        
+        .cta-title {
+            font-family: 'Playfair Display', serif;
+            font-size: 52px;
+            color: var(--navy);
+            margin-bottom: 20px;
+        }
+        
+        .cta-subtitle {
+            font-size: 20px;
+            color: var(--navy);
+            margin-bottom: 40px;
+            opacity: 0.9;
+        }
+        
+        .cta-button {
+            background: var(--navy);
+            color: var(--gold);
+            padding: 18px 50px;
+            font-size: 16px;
+            font-weight: 600;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .cta-button:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 20px 40px rgba(10, 22, 40, 0.3);
+        }
+        
+        .availability-indicator {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 30px;
+            color: var(--navy);
+        }
+        
+        .availability-dot {
+            width: 12px;
+            height: 12px;
+            background: #00ff00;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+        
+        /* Animations */
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        @keyframes fadeInDown {
+            from {
+                opacity: 0;
+                transform: translateY(-30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        @keyframes slideInUp {
+            from {
+                transform: translateY(50px);
+                opacity: 0;
+            }
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+        
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(0, 255, 0, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(0, 255, 0, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(0, 255, 0, 0); }
+        }
+        
+        /* Responsive Design */
+        @media (max-width: 768px) {
+            .client-paths {
+                flex-direction: column;
+                align-items: center;
+            }
+            
+            .path-card {
+                min-width: 90%;
+            }
+            
+            .form-row {
+                grid-template-columns: 1fr;
+            }
+            
+            .service-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .time-slots-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            
+            .urgency-options {
+                flex-direction: column;
+            }
+            
+            h1 {
+                font-size: 42px;
+            }
+            
+            .modal-content {
+                padding: 40px 20px;
+                margin: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Hero Section -->
+    <div class="hero">
+        <nav>
+            <div class="logo">MDG Executive Notary</div>
+            <div class="nav-contact">
+                <div class="trust-indicators">
+                    <span>100+ 5★ Reviews</span>
+                    <span>$5M Coverage</span>
+                    <span>24/7 Available</span>
+                </div>
+                <a href="tel:7145852161" class="priority-line">714-585-2161 • Priority Line</a>
+            </div>
+        </nav>
+        
+        <div class="hero-content">
+            <div class="tagline">Confidential. Immediate. Impeccable.</div>
+            <h1>Executive Notary Services</h1>
+            <div class="subtitle">When your time is worth $1,000/hour, every minute matters.</div>
+            
+            <div class="client-paths">
+                <div class="path-card" onclick="openModal('corporate')">
+                    <h2 class="path-title">Corporate Services</h2>
+                    <ul class="path-services">
+                        <li>M&A Document Execution</li>
+                        <li>Board Resolutions</li>
+                        <li>International Apostilles</li>
+                        <li>Commercial Real Estate</li>
+                    </ul>
+                    <button class="path-cta">Book Corporate Service</button>
+                </div>
+                
+                <div class="path-card" onclick="openModal('private')">
+                    <h2 class="path-title">Private Services</h2>
+                    <ul class="path-services">
+                        <li>Jail & Hospital Visits</li>
+                        <li>Estate Planning Documents</li>
+                        <li>Real Estate Closings</li>
+                        <li>Urgent Personal Matters</li>
+                    </ul>
+                    <button class="path-cta">Book Private Service</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Corporate Services Modal -->
+    <div id="corporateModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal('corporate')">&times;</span>
+            
+            <div class="booking-header">
+                <h2 class="booking-title">Corporate Notary Services</h2>
+                <p class="booking-subtitle">Schedule your executive notary service</p>
+            </div>
+            
+            <div class="booking-progress">
+                <div class="progress-step active" id="corp-progress-1">
+                    <div class="step-circle">1</div>
+                    <div class="step-label">Service</div>
+                </div>
+                <div class="progress-step" id="corp-progress-2">
+                    <div class="step-circle">2</div>
+                    <div class="step-label">Date</div>
+                </div>
+                <div class="progress-step" id="corp-progress-3">
+                    <div class="step-circle">3</div>
+                    <div class="step-label">Time</div>
+                </div>
+                <div class="progress-step" id="corp-progress-4">
+                    <div class="step-circle">4</div>
+                    <div class="step-label">Details</div>
+                </div>
+            </div>
+            
+            <form id="corporateBookingForm" class="booking-form">
+                <!-- Step 1: Service Selection -->
+                <div class="booking-step active" id="corp-step-1">
+                    <h3 class="section-title">Select Your Service</h3>
+                    <div class="service-grid">
+                        <?php foreach($services['corporate'] as $id => $service): ?>
+                        <label class="service-option">
+                            <input type="radio" name="service" value="<?php echo $id; ?>" data-name="<?php echo htmlspecialchars($service['name']); ?>">
+                            <span class="service-name"><?php echo htmlspecialchars($service['name']); ?></span>
+                        </label>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+                
+                <!-- Step 2: Date Selection -->
+                <div class="booking-step" id="corp-step-2">
+                    <h3 class="section-title">Select Date</h3>
+                    <div class="calendar-container">
+                        <div class="calendar-header">
+                            <div class="month-year" id="corp-month-year">Loading...</div>
+                            <div class="calendar-nav">
+                                <button type="button" onclick="changeMonth('corp', -1)">‹</button>
+                                <button type="button" onclick="changeMonth('corp', 1)">›</button>
+                            </div>
+                        </div>
+                        <div class="calendar-month" id="corp-calendar">
+                            <!-- Calendar will be populated by JavaScript -->
+                        </div>
+                    </div>
+                    <input type="hidden" name="date" id="corp-selected-date">
+                </div>
+                
+                <!-- Step 3: Time Selection -->
+                <div class="booking-step" id="corp-step-3">
+                    <h3 class="section-title">Select Time</h3>
+                    <div class="loading-spinner" id="corp-time-loading"></div>
+                    <div class="time-slots-container">
+                        <div class="time-slots-grid" id="corp-time-slots">
+                            <!-- Time slots will be populated by JavaScript -->
+                        </div>
+                    </div>
+                    <input type="hidden" name="time" id="corp-selected-time">
+                </div>
+                
+                <!-- Step 4: Contact Details -->
+                <div class="booking-step" id="corp-step-4">
+                    <h3 class="section-title">Your Information</h3>
+                    
+                    <div class="form-section">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Full Name *</label>
+                                <input type="text" name="name" required>
+                            </div>
+                            <div class="form-group">
+                                <label>Company *</label>
+                                <input type="text" name="company" required>
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Email *</label>
+                                <input type="email" name="email" required>
+                            </div>
+                            <div class="form-group">
+                                <label>Phone *</label>
+                                <input type="tel" name="phone" required>
+                            </div>
+                        </div>
+                        
+                        <div class="form-group full-width">
+                            <label>Service Details</label>
+                            <textarea name="notes" placeholder="Please describe your document type, number of signers, and any special requirements"></textarea>
+                        </div>
+                        
+                        <div class="form-group full-width">
+                            <label>Urgency</label>
+                            <div class="urgency-options">
+                                <label class="urgency-option">
+                                    <input type="radio" name="urgency" value="immediate">
+                                    <span class="urgency-label">Immediate</span>
+                                    <span class="urgency-time">Within 2 hours</span>
+                                </label>
+                                <label class="urgency-option">
+                                    <input type="radio" name="urgency" value="same-day">
+                                    <span class="urgency-label">Same Day</span>
+                                    <span class="urgency-time">Today</span>
+                                </label>
+                                <label class="urgency-option">
+                                    <input type="radio" name="urgency" value="scheduled" checked>
+                                    <span class="urgency-label">Scheduled</span>
+                                    <span class="urgency-time">As selected</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="booking-actions">
+                    <button type="button" class="btn btn-secondary" onclick="previousStep('corp')" id="corp-back-btn" style="display:none;">Back</button>
+                    <button type="button" class="btn btn-primary" onclick="nextStep('corp')" id="corp-next-btn">Next</button>
+                    <button type="submit" class="btn btn-primary" id="corp-submit-btn" style="display:none;">Complete Booking</button>
+                </div>
+            </form>
+            
+            <div class="loading-spinner" id="corp-form-loading"></div>
+            
+            <div class="success-message" id="corp-success" style="display:none;">
+                <div class="success-icon">✓</div>
+                <h3 class="success-title">Booking Confirmed!</h3>
+                <p class="success-text">Your notary appointment has been scheduled. You will receive a confirmation email shortly with all the details.</p>
+                <p class="success-text" id="corp-payment-message" style="display:none;">Please complete your payment to secure your appointment.</p>
+                <button class="btn btn-primary" onclick="closeModal('corporate')">Done</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Private Services Modal -->
+    <div id="privateModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal('private')">&times;</span>
+            
+            <div class="booking-header">
+                <h2 class="booking-title">Private Notary Services</h2>
+                <p class="booking-subtitle">Schedule your personal notary service</p>
+            </div>
+            
+            <div class="booking-progress">
+                <div class="progress-step active" id="priv-progress-1">
+                    <div class="step-circle">1</div>
+                    <div class="step-label">Service</div>
+                </div>
+                <div class="progress-step" id="priv-progress-2">
+                    <div class="step-circle">2</div>
+                    <div class="step-label">Date</div>
+                </div>
+                <div class="progress-step" id="priv-progress-3">
+                    <div class="step-circle">3</div>
+                    <div class="step-label">Time</div>
+                </div>
+                <div class="progress-step" id="priv-progress-4">
+                    <div class="step-circle">4</div>
+                    <div class="step-label">Details</div>
+                </div>
+            </div>
+            
+            <form id="privateBookingForm" class="booking-form">
+                <!-- Step 1: Service Selection -->
+                <div class="booking-step active" id="priv-step-1">
+                    <h3 class="section-title">Select Your Service</h3>
+                    <div class="service-grid">
+                        <?php foreach($services['private'] as $id => $service): ?>
+                        <label class="service-option">
+                            <input type="radio" name="service" value="<?php echo $id; ?>" data-name="<?php echo htmlspecialchars($service['name']); ?>">
+                            <span class="service-name"><?php echo htmlspecialchars($service['name']); ?></span>
+                        </label>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+                
+                <!-- Step 2: Date Selection -->
+                <div class="booking-step" id="priv-step-2">
+                    <h3 class="section-title">Select Date</h3>
+                    <div class="calendar-container">
+                        <div class="calendar-header">
+                            <div class="month-year" id="priv-month-year">Loading...</div>
+                            <div class="calendar-nav">
+                                <button type="button" onclick="changeMonth('priv', -1)">‹</button>
+                                <button type="button" onclick="changeMonth('priv', 1)">›</button>
+                            </div>
+                        </div>
+                        <div class="calendar-month" id="priv-calendar">
+                            <!-- Calendar will be populated by JavaScript -->
+                        </div>
+                    </div>
+                    <input type="hidden" name="date" id="priv-selected-date">
+                </div>
+                
+                <!-- Step 3: Time Selection -->
+                <div class="booking-step" id="priv-step-3">
+                    <h3 class="section-title">Select Time</h3>
+                    <div class="loading-spinner" id="priv-time-loading"></div>
+                    <div class="time-slots-container">
+                        <div class="time-slots-grid" id="priv-time-slots">
+                            <!-- Time slots will be populated by JavaScript -->
+                        </div>
+                    </div>
+                    <input type="hidden" name="time" id="priv-selected-time">
+                </div>
+                
+                <!-- Step 4: Contact Details -->
+                <div class="booking-step" id="priv-step-4">
+                    <h3 class="section-title">Your Information</h3>
+                    
+                    <div class="form-section">
+                        <div class="form-row">
+                            <div class="form-group full-width">
+                                <label>Full Name *</label>
+                                <input type="text" name="name" required>
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Email *</label>
+                                <input type="email" name="email" required>
+                            </div>
+                            <div class="form-group">
+                                <label>Phone *</label>
+                                <input type="tel" name="phone" required>
+                            </div>
+                        </div>
+                        
+                        <div class="form-group full-width">
+                            <label>Service Location</label>
+                            <input type="text" name="location" placeholder="Address or location details">
+                        </div>
+                        
+                        <div class="form-group full-width">
+                            <label>Additional Details</label>
+                            <textarea name="notes" placeholder="Please describe your document type and any special requirements"></textarea>
+                        </div>
+                        
+                        <div class="form-group full-width">
+                            <label>Urgency</label>
+                            <div class="urgency-options">
+                                <label class="urgency-option">
+                                    <input type="radio" name="urgency" value="immediate">
+                                    <span class="urgency-label">Immediate</span>
+                                    <span class="urgency-time">Within 2 hours</span>
+                                </label>
+                                <label class="urgency-option">
+                                    <input type="radio" name="urgency" value="same-day">
+                                    <span class="urgency-label">Same Day</span>
+                                    <span class="urgency-time">Today</span>
+                                </label>
+                                <label class="urgency-option">
+                                    <input type="radio" name="urgency" value="scheduled" checked>
+                                    <span class="urgency-label">Scheduled</span>
+                                    <span class="urgency-time">As selected</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="booking-actions">
+                    <button type="button" class="btn btn-secondary" onclick="previousStep('priv')" id="priv-back-btn" style="display:none;">Back</button>
+                    <button type="button" class="btn btn-primary" onclick="nextStep('priv')" id="priv-next-btn">Next</button>
+                    <button type="submit" class="btn btn-primary" id="priv-submit-btn" style="display:none;">Complete Booking</button>
+                </div>
+            </form>
+            
+            <div class="loading-spinner" id="priv-form-loading"></div>
+            
+            <div class="success-message" id="priv-success" style="display:none;">
+                <div class="success-icon">✓</div>
+                <h3 class="success-title">Booking Confirmed!</h3>
+                <p class="success-text">Your notary appointment has been scheduled. You will receive a confirmation email shortly with all the details.</p>
+                <p class="success-text" id="priv-payment-message" style="display:none;">Please complete your payment to secure your appointment.</p>
+                <button class="btn btn-primary" onclick="closeModal('private')">Done</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Rest of the page content remains the same -->
+    <section class="pain-points">
+        <div class="section-header">
+            <h2 class="section-title">We Understand What's at Stake</h2>
+            <p class="section-subtitle">One error. One delay. Millions in consequences.</p>
+        </div>
+        
+        <div class="pain-grid">
+            <div class="pain-card">
+                <h3 class="pain-title">International Deadlines</h3>
+                <p class="pain-description">Your Hong Kong partners are waiting. Standard notaries don't understand Hague Convention requirements. We do.</p>
+            </div>
+            <div class="pain-card">
+                <h3 class="pain-title">Confidentiality Concerns</h3>
+                <p class="pain-description">M&A documents require absolute discretion. Our notaries sign comprehensive NDAs before every engagement.</p>
+            </div>
+            <div class="pain-card">
+                <h3 class="pain-title">After-Hours Urgency</h3>
+                <p class="pain-description">Critical documents don't follow business hours. Neither do we. Available 24/7 for time-sensitive matters.</p>
+            </div>
+            <div class="pain-card">
+                <h3 class="pain-title">Document Complexity</h3>
+                <p class="pain-description">Multi-page international contracts require expertise. Our team specializes in complex corporate documentation.</p>
+            </div>
+        </div>
+    </section>
+    
+    <section class="value-prop">
+        <div class="value-content">
+            <div class="section-header">
+                <h2 class="section-title">The MDG Difference</h2>
+                <p class="section-subtitle">Why Fortune 500 companies and AmLaw 100 firms choose us</p>
+            </div>
+            
+            <div class="value-grid">
+                <div class="value-category">
+                    <h3 class="value-category-title">Speed & Availability</h3>
+                    <ul class="value-list">
+                        <li>Mobile service - we come to you 24/7</li>
+                        <li>Priority scheduling confirmed within 1 hour</li>
+                        <li>Apostille processing while you wait</li>
+                        <li>Direct courthouse runner service</li>
+                        <li>Emergency hospital & jail access</li>
+                    </ul>
+                </div>
+                
+                <div class="value-category">
+                    <h3 class="value-category-title">Security & Expertise</h3>
+                    <ul class="value-list">
+                        <li>All notaries sign comprehensive NDAs</li>
+                        <li>$5M Errors & Omissions coverage</li>
+                        <li>Background-checked to federal standards</li>
+                        <li>100+ verified 5-star transactions</li>
+                        <li>Fluent in 120+ country requirements</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </section>
+    
+    <section class="social-proof">
+        <div class="section-header">
+            <h2 class="section-title">Trusted by Industry Leaders</h2>
+            <p class="section-subtitle">When failure isn't an option, they choose MDG</p>
+        </div>
+        
+        <div class="testimonials">
+            <div class="testimonial">
+                <p class="testimonial-text">"Last minute notary and Giuliano delivered! Called Giuliano at 2pm on a Friday and he was able to print all 150 pages of documents..."</p>
+                <div class="testimonial-author">
+                    <div class="author-avatar">H</div>
+                    <div class="author-info">
+                        <div class="author-name">Henry O.</div>
+                        <div class="author-title">Irvine, CA</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="testimonial">
+                <p class="testimonial-text">"My family hired MDG Notary to come to my mother's hospital bed on a Saturday night. He came very fast and was very professional..."</p>
+                <div class="testimonial-author">
+                    <div class="author-avatar">RL</div>
+                    <div class="author-info">
+                        <div class="author-name">Randy L.</div>
+                        <div class="author-title">Rancho Santa Margarita, CA</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="testimonial">
+                <p class="testimonial-text">"Seriously hands down the best interaction. He is so professional & accommodating. Just an outstanding human being. Doing my out-of-state home closing..."</p>
+                <div class="testimonial-author">
+                    <div class="author-avatar">JD</div>
+                    <div class="author-info">
+                        <div class="author-name">Jessica D.</div>
+                        <div class="author-title">Santa Ana, CA</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+    
+    <section class="cta-section">
+        <h2 class="cta-title">Your Documents Can't Wait</h2>
+        <p class="cta-subtitle">Connect with a senior notary specialist immediately</p>
+        <button class="cta-button" onclick="document.querySelector('.priority-line').click()">Call Priority Line Now</button>
+        <div class="availability-indicator">
+            <span class="availability-dot"></span>
+            <span>Senior Notary Available Now</span>
+        </div>
+    </section>
+    
+    <script>
+        // Configuration
+        const ajaxUrl = '<?php echo get_permalink(); ?>?action=mdg_ajax';
+        
+        // State management
+        const bookingState = {
+            corp: {
+                currentStep: 1,
+                service: null,
+                date: null,
+                time: null,
+                availableDates: []
+            },
+            priv: {
+                currentStep: 1,
+                service: null,
+                date: null,
+                time: null,
+                availableDates: []
+            }
+        };
+        
+        // Modal Functions
+        function openModal(type) {
+            const modal = document.getElementById(type + 'Modal');
+            modal.classList.add('active');
+            document.body.style.overflow = 'hidden';
+            
+            // Reset form when opening
+            resetBookingForm(type === 'corporate' ? 'corp' : 'priv');
+        }
+        
+        function closeModal(type) {
+            const modal = document.getElementById(type + 'Modal');
+            modal.classList.remove('active');
+            document.body.style.overflow = 'auto';
+        }
+        
+        // Reset booking form
+        function resetBookingForm(prefix) {
+            bookingState[prefix] = {
+                currentStep: 1,
+                service: null,
+                date: null,
+                time: null,
+                availableDates: []
+            };
+            
+            // Reset UI
+            for (let i = 1; i <= 4; i++) {
+                document.getElementById(`${prefix}-step-${i}`).classList.toggle('active', i === 1);
+                document.getElementById(`${prefix}-progress-${i}`).classList.remove('active', 'completed');
+            }
+            document.getElementById(`${prefix}-progress-1`).classList.add('active');
+            
+            document.getElementById(`${prefix}-back-btn`).style.display = 'none';
+            document.getElementById(`${prefix}-next-btn`).style.display = 'block';
+            document.getElementById(`${prefix}-submit-btn`).style.display = 'none';
+            
+            // Clear form
+            document.getElementById(prefix === 'corp' ? 'corporateBookingForm' : 'privateBookingForm').reset();
+        }
+        
+        // Step navigation
+        function nextStep(prefix) {
+            const currentStep = bookingState[prefix].currentStep;
+            
+            // Validate current step
+            if (!validateStep(prefix, currentStep)) {
+                return;
+            }
+            
+            // Move to next step
+            if (currentStep < 4) {
+                showStep(prefix, currentStep + 1);
+                
+                // Load data for next step
+                if (currentStep === 1) {
+                    loadAvailableDates(prefix);
+                } else if (currentStep === 2) {
+                    loadTimeSlots(prefix);
+                }
+            }
+        }
+        
+        function previousStep(prefix) {
+            const currentStep = bookingState[prefix].currentStep;
+            if (currentStep > 1) {
+                showStep(prefix, currentStep - 1);
+            }
+        }
+        
+        function showStep(prefix, step) {
+            bookingState[prefix].currentStep = step;
+            
+            // Update steps visibility
+            for (let i = 1; i <= 4; i++) {
+                document.getElementById(`${prefix}-step-${i}`).classList.toggle('active', i === step);
+                
+                // Update progress indicators
+                const progressStep = document.getElementById(`${prefix}-progress-${i}`);
+                progressStep.classList.toggle('active', i === step);
+                progressStep.classList.toggle('completed', i < step);
+            }
+            
+            // Update buttons
+            document.getElementById(`${prefix}-back-btn`).style.display = step === 1 ? 'none' : 'block';
+            document.getElementById(`${prefix}-next-btn`).style.display = step === 4 ? 'none' : 'block';
+            document.getElementById(`${prefix}-submit-btn`).style.display = step === 4 ? 'block' : 'none';
+        }
+        
+        function validateStep(prefix, step) {
+            const formPrefix = prefix === 'corp' ? 'corporate' : 'private';
+            const form = document.getElementById(formPrefix + 'BookingForm');
+            
+            switch(step) {
+                case 1:
+                    const service = form.querySelector('input[name="service"]:checked');
+                    if (!service) {
+                        alert('Please select a service');
+                        return false;
+                    }
+                    bookingState[prefix].service = service.value;
+                    return true;
+                    
+                case 2:
+                    if (!bookingState[prefix].date) {
+                        alert('Please select a date');
+                        return false;
+                    }
+                    return true;
+                    
+                case 3:
+                    if (!bookingState[prefix].time) {
+                        alert('Please select a time');
+                        return false;
+                    }
+                    return true;
+                    
+                default:
+                    return true;
+            }
+        }
+        
+        // Load available dates
+        function loadAvailableDates(prefix) {
+            const serviceId = bookingState[prefix].service;
+            console.log('Loading dates for service:', serviceId);
+            
+            // Show loading state
+            document.getElementById(`${prefix}-month-year`).textContent = 'Loading...';
+            document.getElementById(`${prefix}-calendar`).innerHTML = '<div style="text-align:center; padding: 20px;">Loading available dates...</div>';
+            
+            jQuery.post(ajaxUrl, {
+                request_type: 'get_dates',
+                service_id: serviceId
+            }, function(response) {
+                console.log('Date response:', response);
+                
+                if (response.success && response.dates) {
+                    bookingState[prefix].availableDates = response.dates;
+                    renderCalendar(prefix);
+                } else {
+                    // Show error message
+                    document.getElementById(`${prefix}-calendar`).innerHTML = 
+                        '<div style="text-align:center; padding: 20px; color: var(--gold);">' +
+                        'Error loading dates: ' + (response.message || 'Unknown error') + 
+                        '<br><br><button onclick="loadAvailableDates(\'' + prefix + '\')" class="btn btn-secondary">Retry</button>' +
+                        '</div>';
+                    
+                    if (response.debug) {
+                        console.error('Debug info:', response.debug);
+                    }
+                }
+            }).fail(function(jqXHR, textStatus, errorThrown) {
+                console.error('AJAX error:', textStatus, errorThrown);
+                document.getElementById(`${prefix}-calendar`).innerHTML = 
+                    '<div style="text-align:center; padding: 20px; color: var(--gold);">' +
+                    'Connection error. Please check your internet connection and try again.' +
+                    '<br><br><button onclick="loadAvailableDates(\'' + prefix + '\')" class="btn btn-secondary">Retry</button>' +
+                    '</div>';
+            });
+        }
+        
+        // Render calendar
+        function renderCalendar(prefix) {
+            const now = new Date();
+            const year = now.getFullYear();
+            const month = now.getMonth();
+            
+            const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+                              'July', 'August', 'September', 'October', 'November', 'December'];
+            
+            document.getElementById(`${prefix}-month-year`).textContent = `${monthNames[month]} ${year}`;
+            
+            const firstDay = new Date(year, month, 1).getDay();
+            const daysInMonth = new Date(year, month + 1, 0).getDate();
+            
+            let calendarHTML = '';
+            
+            // Day labels
+            const dayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+            dayLabels.forEach(day => {
+                calendarHTML += `<div class="day-label">${day}</div>`;
+            });
+            
+            // Empty cells for days before month starts
+            for (let i = 0; i < firstDay; i++) {
+                calendarHTML += '<div class="calendar-day unavailable"></div>';
+            }
+            
+            // Days of the month
+            for (let day = 1; day <= daysInMonth; day++) {
+                const date = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                const isAvailable = bookingState[prefix].availableDates[date] === true;
+                const isPast = new Date(date) < new Date().setHours(0,0,0,0);
+                
+                if (isAvailable && !isPast) {
+                    calendarHTML += `<div class="calendar-day available" onclick="selectDate('${prefix}', '${date}')">${day}</div>`;
+                } else {
+                    calendarHTML += `<div class="calendar-day unavailable">${day}</div>`;
+                }
+            }
+            
+            document.getElementById(`${prefix}-calendar`).innerHTML = calendarHTML;
+        }
+        
+        function changeMonth(prefix, direction) {
+            // This is a simplified version - you'd need to track current month/year
+            // and update accordingly
+            console.log('Change month:', direction);
+        }
+        
+        function selectDate(prefix, date) {
+            // Update UI
+            document.querySelectorAll(`#${prefix}-calendar .calendar-day`).forEach(day => {
+                day.classList.remove('selected');
+            });
+            event.target.classList.add('selected');
+            
+            // Update state
+            bookingState[prefix].date = date;
+            document.getElementById(`${prefix}-selected-date`).value = date;
+        }
+        
+        // Load time slots
+        function loadTimeSlots(prefix) {
+            const serviceId = bookingState[prefix].service;
+            const date = bookingState[prefix].date;
+            
+            // Show loading
+            document.getElementById(`${prefix}-time-loading`).classList.add('active');
+            document.getElementById(`${prefix}-time-slots`).innerHTML = '';
+            
+            jQuery.post(ajaxUrl, {
+                request_type: 'get_times',
+                service_id: serviceId,
+                date: date
+            }, function(response) {
+                document.getElementById(`${prefix}-time-loading`).classList.remove('active');
+                
+                if (response.success && response.times) {
+                    renderTimeSlots(prefix, response.times);
+                }
+            });
+        }
+        
+        function renderTimeSlots(prefix, times) {
+            let slotsHTML = '';
+            
+            times.forEach(time => {
+                const formattedTime = formatTime(time);
+                slotsHTML += `
+                    <label class="time-slot">
+                        <input type="radio" name="time_slot" value="${time}" onchange="selectTime('${prefix}', '${time}')">
+                        <span>${formattedTime}</span>
+                    </label>
+                `;
+            });
+            
+            if (times.length === 0) {
+                slotsHTML = '<p style="grid-column: 1/-1; text-align: center; color: var(--text-light);">No available times for this date. Please select another date.</p>';
+            }
+            
+            document.getElementById(`${prefix}-time-slots`).innerHTML = slotsHTML;
+        }
+        
+        function selectTime(prefix, time) {
+            bookingState[prefix].time = time;
+            document.getElementById(`${prefix}-selected-time`).value = time;
+            
+            // Update UI
+            document.querySelectorAll(`#${prefix}-time-slots .time-slot`).forEach(slot => {
+                slot.classList.remove('selected');
+            });
+            event.target.closest('.time-slot').classList.add('selected');
+        }
+        
+        function formatTime(time) {
+            const [hours, minutes] = time.split(':');
+            const hour = parseInt(hours);
+            const ampm = hour >= 12 ? 'PM' : 'AM';
+            const displayHour = hour % 12 || 12;
+            return `${displayHour}:${minutes} ${ampm}`;
+        }
+        
+        // Form submission
+        document.getElementById('corporateBookingForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            submitBooking('corp');
+        });
+        
+        document.getElementById('privateBookingForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            submitBooking('priv');
+        });
+        
+        function submitBooking(prefix) {
+            const formPrefix = prefix === 'corp' ? 'corporate' : 'private';
+            const form = document.getElementById(formPrefix + 'BookingForm');
+            const formData = new FormData(form);
+            
+            // Show loading
+            document.getElementById(`${prefix}-form-loading`).classList.add('active');
+            form.style.display = 'none';
+            
+            // Add booking data
+            formData.append('request_type', 'create_booking');
+            formData.append('service_id', bookingState[prefix].service);
+            formData.append('date', bookingState[prefix].date);
+            formData.append('time', bookingState[prefix].time);
+            
+            jQuery.ajax({
+                url: ajaxUrl,
+                type: 'POST',
+                data: formData,
+                processData: false,
+                contentType: false,
+                success: function(response) {
+                    document.getElementById(`${prefix}-form-loading`).classList.remove('active');
+                    
+                    if (response.success) {
+                        // Show success message
+                        document.getElementById(`${prefix}-success`).style.display = 'block';
+                        
+                        if (response.payment_required && response.payment_url) {
+                            document.getElementById(`${prefix}-payment-message`).style.display = 'block';
+                            // Optionally redirect to payment
+                            setTimeout(() => {
+                                window.open(response.payment_url, '_blank');
+                            }, 2000);
+                        }
+                    } else {
+                        alert('There was an error processing your booking. Please try again.');
+                        form.style.display = 'block';
+                    }
+                },
+                error: function() {
+                    document.getElementById(`${prefix}-form-loading`).classList.remove('active');
+                    form.style.display = 'block';
+                    alert('There was an error processing your booking. Please try again.');
+                }
+            });
+        }
+        
+        // Service option selection
+        document.querySelectorAll('.service-option').forEach(option => {
+            option.addEventListener('click', function() {
+                this.closest('.service-grid').querySelectorAll('.service-option').forEach(opt => {
+                    opt.classList.remove('selected');
+                });
+                this.classList.add('selected');
+                this.querySelector('input[type="radio"]').checked = true;
+            });
+        });
+        
+        // Urgency option selection
+        document.querySelectorAll('.urgency-option').forEach(option => {
+            option.addEventListener('click', function() {
+                this.closest('.urgency-options').querySelectorAll('.urgency-option').forEach(opt => {
+                    opt.classList.remove('selected');
+                });
+                this.classList.add('selected');
+                this.querySelector('input[type="radio"]').checked = true;
+            });
+        });
+        
+        // Close modal when clicking outside
+        window.onclick = function(event) {
+            if (event.target.classList.contains('modal')) {
+                event.target.classList.remove('active');
+                document.body.style.overflow = 'auto';
+            }
+        }
+        
+        // Add smooth scrolling
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({ behavior: 'smooth' });
+                }
+            });
+        });
+        
+        // Add parallax effect to hero
+        window.addEventListener('scroll', () => {
+            const scrolled = window.pageYOffset;
+            const hero = document.querySelector('.hero');
+            hero.style.transform = `translateY(${scrolled * 0.5}px)`;
+        });
+        
+        // Animate elements on scroll
+        const observerOptions = {
+            threshold: 0.3,
+            rootMargin: '0px'
+        };
+        
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.style.animation = 'fadeInUp 1s ease forwards';
+                }
+            });
+        }, observerOptions);
+        
+        document.querySelectorAll('.pain-card, .testimonial').forEach(el => {
+            observer.observe(el);
+        });
+    </script>
+</body>
+</html>
