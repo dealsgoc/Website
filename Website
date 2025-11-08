@@ -289,7 +289,10 @@ if (isset($_GET['action']) && $_GET['action'] === 'mdg_ajax') {
                 'email' => sanitize_email($_POST['email']),
                 'phone' => sanitize_text_field($_POST['phone'])
             ];
-            
+
+            $selected_time = isset($_POST['time']) ? $_POST['time'] : '';
+            $normalized_time = substr($selected_time, 0, 5);
+
             $additional = [];
             if (!empty($_POST['company'])) {
                 $additional[] = ['id' => 1, 'value' => sanitize_text_field($_POST['company'])];
@@ -304,7 +307,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'mdg_ajax') {
             $result = $api->createBooking(
                 intval($_POST['service_id']),
                 $_POST['date'],
-                $_POST['time'],
+                $normalized_time,
                 $client_data,
                 $additional
             );
