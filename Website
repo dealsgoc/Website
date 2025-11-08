@@ -255,49 +255,18 @@ if (isset($_GET['action']) && $_GET['action'] === 'mdg_ajax') {
     try {
         if ($_POST['request_type'] === 'get_dates') {
             $service_id = intval($_POST['service_id']);
-            
-            // Test API connection first
-            $test_request = [
-                'jsonrpc' => '2.0',
-                'method' => 'getCompanyInfo',
-                'params' => [],
-                'id' => 1
-            ];
-            
-            // Try to get company info to test connection
-            $ch = curl_init();
-            curl_setopt($ch, CURLOPT_URL, 'https://user-api-v2.simplybook.me/admin/');
-            curl_setopt($ch, CURLOPT_HTTPHEADER, [
-                'Content-Type: application/json',
-                'X-Company-Login: mdgnotaryca',
-                'X-Token: 3ce5e34c1a42959c9c61f4ffb2f3e4a7f473b717e41cfe10c31702f24ecd0242'
-            ]);
-            curl_setopt($ch, CURLOPT_POST, true);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($test_request));
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-            
-            $test_response = curl_exec($ch);
-            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
-            
-            if ($http_code !== 200) {
-                $response['message'] = 'API Connection failed. HTTP Code: ' . $http_code;
-                $response['debug'] = $test_response;
+
+            $result = $api->getAvailableDates($service_id);
+
+            if ($result && isset($result['result'])) {
+                $response = [
+                    'success' => true,
+                    'dates' => $result['result'],
+                    'message' => 'Dates loaded successfully'
+                ];
             } else {
-                // Now get the actual dates
-                $result = $api->getAvailableDates($service_id);
-                
-                if ($result && isset($result['result'])) {
-                    $response = [
-                        'success' => true, 
-                        'dates' => $result['result'],
-                        'message' => 'Dates loaded successfully'
-                    ];
-                } else {
-                    $response['message'] = 'No dates available for this service';
-                    $response['debug'] = json_encode($result);
-                }
+                $response['message'] = 'Unable to load dates at this time.';
+                $response['debug'] = is_scalar($result) ? $result : json_encode($result);
             }
         }
         
