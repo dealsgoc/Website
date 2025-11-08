@@ -167,11 +167,8 @@ class SimplybookAPI {
                 continue;
             }
 
-            if (!empty($slot['time'])) {
-                $time_value = substr($slot['time'], 0, 5);
-                $available_times[] = $time_value;
-            } elseif (!empty($slot['client_time'])) {
-                $time_value = substr($slot['client_time'], 0, 5);
+            $time_value = $slot['time'] ?? $slot['client_time'] ?? '';
+            if (!empty($time_value)) {
                 $available_times[] = $time_value;
             }
         }
