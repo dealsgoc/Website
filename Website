@@ -3,162 +3,430 @@
 Template Name: MDG Notary Page with Booking System
 */
 
+if (!defined('MINUTE_IN_SECONDS')) {
+    define('MINUTE_IN_SECONDS', 60);
+}
+
 // SimplyBook.me API Integration Class
 class SimplybookAPI {
-    private $company_login = 'mdgnotaryca';
-    // Using the token directly since it's already authenticated
-    private $token = '3ce5e34c1a42959c9c61f4ffb2f3e4a7f473b717e41cfe10c31702f24ecd0242';
-    private $api_url = 'https://user-api.simplybook.me/';
-    private $unit_id = 2; // Giuliano Helguero
-    
+    private $company_login   = 'mdgnotaryca';
+    private $unit_id         = 2; // Giuliano Helguero
+    private $public_api_base = 'https://mdgnotaryca.simplybook.me/v2';
+    private $admin_api_base  = 'https://user-api-v2.simplybook.me/admin/';
+    private $auth_api_base   = 'https://user-api.simplybook.me/';
+
+    private $api_login;
+    private $api_password;
+    private $token;
+    private $token_expires_at;
+
+    private const TOKEN_TRANSIENT_KEY = 'mdg_simplybook_admin_token';
+    private const TOKEN_TTL_SECONDS   = 50 * MINUTE_IN_SECONDS; // default TTL if API does not return one
+
     public function __construct() {
-        // Token is already set, no need to authenticate
+        $this->api_login    = $this->getConfigValue('SIMPLYBOOK_API_LOGIN');
+        $this->api_password = $this->getConfigValue('SIMPLYBOOK_API_PASSWORD');
+        $this->loadCachedToken();
     }
-    
-    private function makeRequest($url, $data, $use_token = true) {
-        $ch = curl_init();
-        
-        // Correct endpoint URL
-        if ($use_token && $this->token) {
-            $url = 'https://user-api-v2.simplybook.me/admin/';
+
+    private function getConfigValue($key) {
+        if (defined($key)) {
+            return constant($key);
         }
-        
-        $headers = [
-            'Content-Type: application/json',
-            'X-Company-Login: ' . $this->company_login,
-            'X-Token: ' . $this->token
-        ];
-        
-        curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        
-        $response = curl_exec($ch);
-        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        
-        if (curl_errno($ch)) {
-            error_log('CURL Error: ' . curl_error($ch));
+
+        $value = getenv($key);
+        return $value !== false ? $value : '';
+    }
+
+    private function loadCachedToken(): void {
+        if (!function_exists('get_transient')) {
+            return;
+        }
+
+        $cached = get_transient(self::TOKEN_TRANSIENT_KEY);
+
+        if (is_array($cached) && !empty($cached['token'])) {
+            $expires = isset($cached['expires']) ? (int) $cached['expires'] : (time() + self::TOKEN_TTL_SECONDS);
+
+            if ($expires > (time() + MINUTE_IN_SECONDS)) {
+                $this->token             = $cached['token'];
+                $this->token_expires_at  = $expires;
+            }
+        }
+    }
+
+    private function cacheToken(string $token, int $ttl = self::TOKEN_TTL_SECONDS): void {
+        $this->token            = $token;
+        $this->token_expires_at = time() + $ttl;
+
+        if (function_exists('set_transient')) {
+            set_transient(
+                self::TOKEN_TRANSIENT_KEY,
+                [
+                    'token'   => $token,
+                    'expires' => $this->token_expires_at,
+                ],
+                $ttl
+            );
+        }
+    }
+
+    private function invalidateToken(): void {
+        $this->token            = null;
+        $this->token_expires_at = null;
+
+        if (function_exists('delete_transient')) {
+            delete_transient(self::TOKEN_TRANSIENT_KEY);
+        }
+    }
+
+    private function ensureToken(): bool {
+        if ($this->token && (!$this->token_expires_at || $this->token_expires_at > (time() + MINUTE_IN_SECONDS))) {
+            return true;
+        }
+
+        $this->loadCachedToken();
+
+        if ($this->token && (!$this->token_expires_at || $this->token_expires_at > (time() + MINUTE_IN_SECONDS))) {
+            return true;
+        }
+
+        if (empty($this->api_login) || empty($this->api_password)) {
+            error_log('SimplyBook API credentials are not configured. Set SIMPLYBOOK_API_LOGIN and SIMPLYBOOK_API_PASSWORD.');
             return false;
         }
-        
-        curl_close($ch);
-        
-        $result = json_decode($response, true);
-        
-        // Debug logging
-        error_log('API Request to: ' . $url);
-        error_log('API Response Code: ' . $http_code);
-        error_log('API Response: ' . substr($response, 0, 500));
-        
-        return $result;
+
+        $payload = [
+            'jsonrpc' => '2.0',
+            'method'  => 'login',
+            'params'  => [
+                'company_login' => $this->company_login,
+                'login'         => $this->api_login,
+                'password'      => $this->api_password,
+            ],
+            'id'      => 1,
+        ];
+
+        $response = $this->rawRequest($this->auth_api_base, $payload, ['Content-Type: application/json']);
+
+        if (!empty($response['error'])) {
+            error_log('SimplyBook login failed: ' . $response['error']);
+            return false;
+        }
+
+        if ($response['http_code'] !== 200 || empty($response['decoded']['result']['token'])) {
+            error_log('SimplyBook login unexpected response: ' . $response['raw']);
+            return false;
+        }
+
+        $result  = $response['decoded']['result'];
+        $token   = $result['token'];
+        $ttl     = isset($result['token_valid_until'])
+            ? max(60, (int) $result['token_valid_until'] - time())
+            : self::TOKEN_TTL_SECONDS;
+
+        $this->cacheToken($token, $ttl);
+        return true;
     }
-    
+
+    private function rawRequest(string $url, array $data, array $headers = []): array {
+        $ch = curl_init($url);
+
+        $headers = array_merge(['Content-Type: application/json'], $headers);
+
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST           => true,
+            CURLOPT_POSTFIELDS     => json_encode($data),
+            CURLOPT_HTTPHEADER     => $headers,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_TIMEOUT        => 30,
+        ]);
+
+        $raw       = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error     = curl_errno($ch) ? curl_error($ch) : null;
+
+        curl_close($ch);
+
+        $decoded = $raw !== false ? json_decode($raw, true) : null;
+
+        if ($error) {
+            error_log('SimplyBook CURL error: ' . $error);
+        }
+
+        return [
+            'http_code' => $http_code ?: 0,
+            'decoded'   => $decoded,
+            'raw'       => $raw,
+            'error'     => $error,
+        ];
+    }
+
+    private function makeRequest(array $payload, ?string $endpoint = null, bool $use_token = true, bool $retry = true) {
+        $url = $use_token
+            ? $this->admin_api_base . ltrim((string) $endpoint, '/')
+            : $this->auth_api_base . ltrim((string) $endpoint, '/');
+
+        if ($use_token && !$this->ensureToken()) {
+            return [
+                'error' => [
+                    'message' => 'Authentication with SimplyBook failed. Please verify your credentials.',
+                ],
+            ];
+        }
+
+        $headers = ['Content-Type: application/json'];
+
+        if ($use_token) {
+            $headers[] = 'X-Company-Login: ' . $this->company_login;
+            $headers[] = 'X-Token: ' . $this->token;
+        }
+
+        $response = $this->rawRequest($url, $payload, $headers);
+
+        if ($use_token && $response['http_code'] === 401 && $retry) {
+            $this->invalidateToken();
+
+            if ($this->ensureToken()) {
+                $headers = [
+                    'Content-Type: application/json',
+                    'X-Company-Login: ' . $this->company_login,
+                    'X-Token: ' . $this->token,
+                ];
+
+                $response = $this->rawRequest($url, $payload, $headers);
+            }
+        }
+
+        if ($response['http_code'] >= 400) {
+            error_log(sprintf(
+                'SimplyBook API error (%s): %s',
+                $response['http_code'],
+                substr($response['raw'] ?? '', 0, 500)
+            ));
+        }
+
+        if (is_array($response['decoded'])) {
+            $response['decoded']['_http_code'] = $response['http_code'];
+            return $response['decoded'];
+        }
+
+        return [
+            'error'      => [
+                'message' => 'Unexpected response from SimplyBook.',
+            ],
+            '_http_code' => $response['http_code'],
+        ];
+    }
+
+    private function makePublicGet(string $path, array $params = []) {
+        $base = rtrim($this->public_api_base, '/');
+        $url  = $base . '/' . ltrim($path, '/');
+
+        if (!empty($params)) {
+            $url .= '?' . http_build_query($params);
+        }
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_HTTPHEADER     => ['Accept: application/json'],
+            CURLOPT_TIMEOUT        => 25,
+        ]);
+
+        $response  = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error     = curl_errno($ch) ? curl_error($ch) : null;
+        curl_close($ch);
+
+        if ($error) {
+            error_log('SimplyBook public API error: ' . $error);
+            return false;
+        }
+
+        if ($http_code !== 200) {
+            error_log("Public API request failed ({$http_code}): {$url}");
+            error_log('Response body: ' . substr((string) $response, 0, 500));
+            return false;
+        }
+
+        $decoded = json_decode($response, true);
+
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            error_log('Public API JSON decode error: ' . json_last_error_msg());
+            error_log('Response body: ' . substr((string) $response, 0, 500));
+            return false;
+        }
+
+        return $decoded;
+    }
+
     public function getAvailableDates($event_id, $date_from = null, $date_to = null) {
         if (!$date_from) {
             $date_from = date('Y-m-d');
         }
+
         if (!$date_to) {
             $date_to = date('Y-m-d', strtotime('+30 days'));
         }
-        
-        $request = [
-            'jsonrpc' => '2.0',
-            'method' => 'getWorkDaysInfo',
-            'params' => [
-                $date_from,     // from date
-                $date_to,       // to date
-                intval($this->unit_id),  // unit_id as integer
-                intval($event_id),       // event_id as integer
-                1               // count
-            ],
-            'id' => 1
-        ];
-        
-        $result = $this->makeRequest(null, $request, true);
-        
-        // Return the result array directly
-        return $result;
-    }
-    
-    public function getAvailableTimeSlots($event_id, $date) {
-        $request = [
-            'jsonrpc' => '2.0',
-            'method' => 'getStartTimeMatrix',
-            'params' => [
-                $date,
-                $date,
-                $event_id,
-                $this->unit_id,
-                1
-            ],
-            'id' => 1
-        ];
-        
-        return $this->makeRequest(null, $request);
-    }
-    
-    public function createBooking($event_id, $date, $time, $client_data, $additional = []) {
-        $client = $this->addClient($client_data);
-        
-        if (!$client) {
+
+        $days = $this->makePublicGet('/booking/working-days/', [
+            'service' => (int) $event_id,
+            'unit'    => (int) $this->unit_id,
+            'from'    => $date_from,
+            'to'      => $date_to,
+            'count'   => 1,
+        ]);
+
+        if ($days === false || !is_array($days)) {
             return false;
         }
-        
-        $request = [
+
+        $availability = [];
+
+        foreach ($days as $day) {
+            if (!isset($day['id'])) {
+                continue;
+            }
+
+            $has_time   = !empty($day['time']) && is_array($day['time']);
+            $is_day_off = !empty($day['is_day_off']);
+
+            $availability[$day['id']] = $has_time && !$is_day_off;
+        }
+
+        return ['result' => $availability];
+    }
+
+    public function getAvailableTimeSlots($event_id, $date) {
+        $slots = $this->makePublicGet('/booking/time-slots/', [
+            'from'     => $date,
+            'to'       => $date,
+            'provider' => (int) $this->unit_id,
+            'service'  => (int) $event_id,
+            'count'    => 1,
+        ]);
+
+        if ($slots === false || !is_array($slots)) {
+            return false;
+        }
+
+        $times = [];
+
+        foreach ($slots as $slot) {
+            if (!is_array($slot) || ($slot['type'] ?? '') !== 'free') {
+                continue;
+            }
+
+            $value = $slot['time'] ?? $slot['client_time'] ?? '';
+
+            if (!empty($value)) {
+                $times[] = $value;
+            }
+        }
+
+        return ['result' => [$date => array_values(array_unique($times))]];
+    }
+
+    public function createBooking($event_id, $date, $time, $client_data, $additional = []) {
+        $client = $this->addClient($client_data);
+
+        if (!$client || empty($client['id'])) {
+            return [
+                'error' => [
+                    'message' => 'Unable to create or locate client in SimplyBook.',
+                ],
+            ];
+        }
+
+        $payload = [
             'jsonrpc' => '2.0',
-            'method' => 'book',
-            'params' => [
-                $event_id,
-                $this->unit_id,
+            'method'  => 'book',
+            'params'  => [
+                (int) $event_id,
+                (int) $this->unit_id,
                 $date,
                 $time,
                 [
-                    'id' => $client['id'],
-                    'name' => $client_data['name'],
+                    'id'    => $client['id'],
+                    'name'  => $client_data['name'],
                     'email' => $client_data['email'],
-                    'phone' => $client_data['phone']
+                    'phone' => $client_data['phone'],
                 ],
                 $additional,
-                1
+                1,
             ],
-            'id' => 1
+            'id' => 1,
         ];
-        
-        return $this->makeRequest(null, $request);
+
+        return $this->makeRequest($payload);
     }
-    
+
     public function addClient($client_data) {
-        $request = [
+        $payload = [
             'jsonrpc' => '2.0',
-            'method' => 'addClient',
-            'params' => [
+            'method'  => 'addClient',
+            'params'  => [
                 [
-                    'name' => $client_data['name'],
+                    'name'  => $client_data['name'],
                     'email' => $client_data['email'],
-                    'phone' => $client_data['phone']
-                ]
+                    'phone' => $client_data['phone'],
+                ],
             ],
-            'id' => 1
+            'id' => 1,
         ];
-        
-        $response = $this->makeRequest(null, $request);
-        return isset($response['result']) ? $response['result'] : false;
+
+        $response = $this->makeRequest($payload);
+
+        if (isset($response['result'])) {
+            return $response['result'];
+        }
+
+        if (!empty($response['error']['message'])) {
+            error_log('SimplyBook addClient error: ' . $response['error']['message']);
+        }
+
+        return $this->getClientByEmail($client_data['email']);
     }
-    
-    public function getPaymentInfo($booking_id) {
-        $request = [
+
+    private function getClientByEmail($email) {
+        if (empty($email)) {
+            return false;
+        }
+
+        $payload = [
             'jsonrpc' => '2.0',
-            'method' => 'getBookingCartPaymentPageUrl',
-            'params' => [
-                $booking_id
+            'method'  => 'getClients',
+            'params'  => [
+                ['email' => $email],
+                0,
+                1,
             ],
-            'id' => 1
+            'id' => 1,
         ];
-        
-        return $this->makeRequest(null, $request);
+
+        $response = $this->makeRequest($payload);
+
+        if (isset($response['result'][0])) {
+            return $response['result'][0];
+        }
+
+        return false;
+    }
+
+    public function getPaymentInfo($booking_id) {
+        $payload = [
+            'jsonrpc' => '2.0',
+            'method'  => 'getBookingCartPaymentPageUrl',
+            'params'  => [
+                $booking_id,
+            ],
+            'id' => 1,
+        ];
+
+        return $this->makeRequest($payload);
     }
 }
 
@@ -172,65 +440,44 @@ if (isset($_GET['action']) && $_GET['action'] === 'mdg_ajax') {
     try {
         if ($_POST['request_type'] === 'get_dates') {
             $service_id = intval($_POST['service_id']);
-            
-            // Test API connection first
-            $test_request = [
-                'jsonrpc' => '2.0',
-                'method' => 'getCompanyInfo',
-                'params' => [],
-                'id' => 1
-            ];
-            
-            // Try to get company info to test connection
-            $ch = curl_init();
-            curl_setopt($ch, CURLOPT_URL, 'https://user-api-v2.simplybook.me/admin/');
-            curl_setopt($ch, CURLOPT_HTTPHEADER, [
-                'Content-Type: application/json',
-                'X-Company-Login: mdgnotaryca',
-                'X-Token: 3ce5e34c1a42959c9c61f4ffb2f3e4a7f473b717e41cfe10c31702f24ecd0242'
-            ]);
-            curl_setopt($ch, CURLOPT_POST, true);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($test_request));
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-            
-            $test_response = curl_exec($ch);
-            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
-            
-            if ($http_code !== 200) {
-                $response['message'] = 'API Connection failed. HTTP Code: ' . $http_code;
-                $response['debug'] = $test_response;
+
+            $result = $api->getAvailableDates($service_id);
+
+            if ($result && isset($result['result']) && !empty($result['result'])) {
+                $response = [
+                    'success' => true,
+                    'dates'   => $result['result'],
+                    'message' => 'Dates loaded successfully',
+                ];
             } else {
-                // Now get the actual dates
-                $result = $api->getAvailableDates($service_id);
-                
-                if ($result && isset($result['result'])) {
-                    $response = [
-                        'success' => true, 
-                        'dates' => $result['result'],
-                        'message' => 'Dates loaded successfully'
-                    ];
-                } else {
-                    $response['message'] = 'No dates available for this service';
-                    $response['debug'] = json_encode($result);
+                $response['message'] = 'Unable to load available dates right now.';
+
+                if (is_array($result) && !empty($result['error']['message'])) {
+                    $response['message'] = $result['error']['message'];
+                    $response['debug']   = $result['error']['message'];
                 }
             }
         }
         
         if ($_POST['request_type'] === 'get_times') {
             $service_id = intval($_POST['service_id']);
-            $date = $_POST['date'];
-            
+            $date       = sanitize_text_field($_POST['date']);
+
             $result = $api->getAvailableTimeSlots($service_id, $date);
+
             if ($result && isset($result['result'])) {
                 $response = [
-                    'success' => true, 
-                    'times' => $result['result'][$date] ?? [],
-                    'message' => 'Times loaded successfully'
+                    'success' => true,
+                    'times'   => $result['result'][$date] ?? [],
+                    'message' => 'Times loaded successfully',
                 ];
             } else {
-                $response['message'] = 'No times available for this date';
+                $response['message'] = 'No times available for this date.';
+
+                if (is_array($result) && !empty($result['error']['message'])) {
+                    $response['message'] = $result['error']['message'];
+                    $response['debug']   = $result['error']['message'];
+                }
             }
         }
         
@@ -254,8 +501,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'mdg_ajax') {
             
             $result = $api->createBooking(
                 intval($_POST['service_id']),
-                $_POST['date'],
-                $_POST['time'],
+                sanitize_text_field($_POST['date']),
+                sanitize_text_field($_POST['time']),
                 $client_data,
                 $additional
             );
@@ -279,7 +526,12 @@ if (isset($_GET['action']) && $_GET['action'] === 'mdg_ajax') {
                     'message' => 'Booking created successfully'
                 ];
             } else {
-                $response['message'] = 'Failed to create booking';
+                $response['message'] = 'Failed to create booking. Please try again or call our priority line.';
+
+                if (is_array($result) && !empty($result['error']['message'])) {
+                    $response['message'] = $result['error']['message'];
+                    $response['debug']   = $result['error']['message'];
+                }
             }
         }
         
@@ -1984,30 +2236,34 @@ $services = [
             document.getElementById(`${prefix}-month-year`).textContent = 'Loading...';
             document.getElementById(`${prefix}-calendar`).innerHTML = '<div style="text-align:center; padding: 20px;">Loading available dates...</div>';
             
-            jQuery.post(ajaxUrl, {
-                request_type: 'get_dates',
-                service_id: serviceId
-            }, function(response) {
+            jQuery.ajax({
+                url: ajaxUrl,
+                type: 'POST',
+                dataType: 'json',
+                data: {
+                    request_type: 'get_dates',
+                    service_id: serviceId
+                }
+            }).done(function(response) {
                 console.log('Date response:', response);
-                
+
                 if (response.success && response.dates) {
                     bookingState[prefix].availableDates = response.dates;
                     renderCalendar(prefix);
                 } else {
-                    // Show error message
-                    document.getElementById(`${prefix}-calendar`).innerHTML = 
+                    document.getElementById(`${prefix}-calendar`).innerHTML =
                         '<div style="text-align:center; padding: 20px; color: var(--gold);">' +
-                        'Error loading dates: ' + (response.message || 'Unknown error') + 
+                        'Error loading dates: ' + (response.message || 'Unknown error') +
                         '<br><br><button onclick="loadAvailableDates(\'' + prefix + '\')" class="btn btn-secondary">Retry</button>' +
                         '</div>';
-                    
+
                     if (response.debug) {
-                        console.error('Debug info:', response.debug);
+                        console.error('SimplyBook debug:', response.debug);
                     }
                 }
             }).fail(function(jqXHR, textStatus, errorThrown) {
                 console.error('AJAX error:', textStatus, errorThrown);
-                document.getElementById(`${prefix}-calendar`).innerHTML = 
+                document.getElementById(`${prefix}-calendar`).innerHTML =
                     '<div style="text-align:center; padding: 20px; color: var(--gold);">' +
                     'Connection error. Please check your internet connection and try again.' +
                     '<br><br><button onclick="loadAvailableDates(\'' + prefix + '\')" class="btn btn-secondary">Retry</button>' +
@@ -2085,16 +2341,37 @@ $services = [
             document.getElementById(`${prefix}-time-loading`).classList.add('active');
             document.getElementById(`${prefix}-time-slots`).innerHTML = '';
             
-            jQuery.post(ajaxUrl, {
-                request_type: 'get_times',
-                service_id: serviceId,
-                date: date
-            }, function(response) {
+            jQuery.ajax({
+                url: ajaxUrl,
+                type: 'POST',
+                dataType: 'json',
+                data: {
+                    request_type: 'get_times',
+                    service_id: serviceId,
+                    date: date
+                }
+            }).done(function(response) {
                 document.getElementById(`${prefix}-time-loading`).classList.remove('active');
-                
+
                 if (response.success && response.times) {
                     renderTimeSlots(prefix, response.times);
+                } else {
+                    document.getElementById(`${prefix}-time-slots`).innerHTML =
+                        '<p style="grid-column: 1/-1; text-align: center; color: var(--text-light);"> ' +
+                        (response.message || 'No times available for this date.') +
+                        '</p>';
+
+                    if (response.debug) {
+                        console.error('SimplyBook debug:', response.debug);
+                    }
                 }
+            }).fail(function(jqXHR, textStatus, errorThrown) {
+                document.getElementById(`${prefix}-time-loading`).classList.remove('active');
+                document.getElementById(`${prefix}-time-slots`).innerHTML =
+                    '<p style="grid-column: 1/-1; text-align: center; color: var(--text-light);">' +
+                    'Connection issue while loading times. Please try again.' +
+                    '</p>';
+                console.error('AJAX error:', textStatus, errorThrown);
             });
         }
         
@@ -2166,32 +2443,36 @@ $services = [
             jQuery.ajax({
                 url: ajaxUrl,
                 type: 'POST',
+                dataType: 'json',
                 data: formData,
                 processData: false,
                 contentType: false,
                 success: function(response) {
                     document.getElementById(`${prefix}-form-loading`).classList.remove('active');
-                    
+
                     if (response.success) {
-                        // Show success message
                         document.getElementById(`${prefix}-success`).style.display = 'block';
-                        
+
                         if (response.payment_required && response.payment_url) {
                             document.getElementById(`${prefix}-payment-message`).style.display = 'block';
-                            // Optionally redirect to payment
                             setTimeout(() => {
                                 window.open(response.payment_url, '_blank');
                             }, 2000);
                         }
                     } else {
-                        alert('There was an error processing your booking. Please try again.');
+                        alert(response.message || 'There was an error processing your booking. Please try again.');
                         form.style.display = 'block';
+
+                        if (response.debug) {
+                            console.error('SimplyBook debug:', response.debug);
+                        }
                     }
                 },
-                error: function() {
+                error: function(xhr, textStatus, errorThrown) {
                     document.getElementById(`${prefix}-form-loading`).classList.remove('active');
                     form.style.display = 'block';
                     alert('There was an error processing your booking. Please try again.');
+                    console.error('AJAX error:', textStatus, errorThrown);
                 }
             });
         }
